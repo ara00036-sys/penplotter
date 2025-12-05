@@ -28,9 +28,11 @@
       <label>Laser mode (use M3/M5 instead of Z): <input id="laser" type="checkbox" /></label>
 
       <div class="buttons">
-        <button id="generate">Generate G-Code</button>
+        <button id="generate" disabled>Generate G-Code</button>
         <button id="download" disabled>Download G-Code</button>
       </div>
+
+      <div id="status" aria-live="polite" style="margin-top:.5rem;color:#333;"></div>
     </section>
 
     <section class="preview">
