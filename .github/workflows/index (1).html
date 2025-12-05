@@ -1,51 +1,318 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Image → G-Code (Pen Plotter / Laser / CNC)</title>
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-  <header>
-    <h1>Image → G-Code</h1>
-    <p>Upload an image, preview traced paths, and download GRBL-compatible G-Code.</p>
-  </header>
+// script.js - image tracing (marching squares), preview, and G-Code generation
 
-  <main>
-    <section class="controls">
-      <label>Choose image:
-        <input id="file" type="file" accept="image/*" />
-      </label>
+const fileInput = document.getElementById('file');
+const thresholdInput = document.getElementById('threshold');
+const canvas = document.getElementById('previewCanvas');
+const ctx = canvas.getContext('2d', {alpha:false});
+const generateBtn = document.getElementById('generate');
+const downloadBtn = document.getElementById('download');
+const gcodeView = document.getElementById('gcodeView');
 
-      <label>Threshold: <input id="threshold" type="range" min="0" max="255" value="128" /></label>
-      <label>Scale (mm per px): <input id="scale" type="number" value="0.25" step="0.01" /></label>
-      <label>Draw Feed F (mm/min): <input id="feed" type="number" value="1000" /></label>
-      <label>Travel Feed F (mm/min): <input id="travel" type="number" value="3000" /></label>
-      <label>Use Z lift (pen): <input id="useZ" type="checkbox" checked /></label>
-      <label>Z up (mm): <input id="zUp" type="number" value="5" step="0.1" /></label>
-      <label>Z down (mm): <input id="zDown" type="number" value="0" step="0.1" /></label>
-      <label>Laser mode (use M3/M5 instead of Z): <input id="laser" type="checkbox" /></label>
+const scaleInput = document.getElementById('scale');
+const feedInput = document.getElementById('feed');
+const travelInput = document.getElementById('travel');
+const useZInput = document.getElementById('useZ');
+const zUpInput = document.getElementById('zUp');
+const zDownInput = document.getElementById('zDown');
+const laserInput = document.getElementById('laser');
 
-      <div class="buttons">
-        <button id="generate">Generate G-Code</button>
-        <button id="download" disabled>Download G-Code</button>
-      </div>
-    </section>
+let imgWidth=0, imgHeight=0;
+let lastPaths = null;
 
-    <section class="preview">
-      <canvas id="previewCanvas" width="800" height="600"></canvas>
-      <div class="gcode-output">
-        <h3>G-Code preview</h3>
-        <pre id="gcodeView" spellcheck="false"></pre>
-      </div>
-    </section>
-  </main>
+fileInput.addEventListener('change', handleFile);
+thresholdInput.addEventListener('input', () => {
+  if (lastImage) drawImageAndTrace(lastImage);
+});
 
-  <footer>
-    <small>Designed for simple shapes and sketches. For complex images, increase resolution or pre-process externally.</small>
-  </footer>
+generateBtn.addEventListener('click', () => {
+  if (!lastPaths) {
+    alert('Load an image first.');
+    return;
+  }
+  const opts = getOptions();
+  const gcode = generateGCode(lastPaths, opts);
+  gcodeView.textContent = gcode;
+  downloadBtn.disabled = false;
+  downloadBtn.onclick = () => downloadText(gcode, 'plot.gcode');
+});
 
-  <script src="script.js"></script>
-</body>
-</html>
+let lastImage = null;
+function handleFile(e){
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const img = new Image();
+    img.onload = () => {
+      lastImage = img;
+      drawImageAndTrace(img);
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(f);
+}
+
+function drawImageAndTrace(img){
+  // fit image to canvas keeping aspect ratio
+  const maxW = canvas.width;
+  const maxH = canvas.height;
+  let w = img.width, h = img.height;
+  const ratio = Math.min(maxW/w, maxH/h, 1);
+  w = Math.floor(w * ratio);
+  h = Math.floor(h * ratio);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img, 0,0,w,h);
+  // get image data and convert to binary
+  const imageData = ctx.getImageData(0,0,w,h);
+  const thresh = parseInt(thresholdInput.value,10);
+  const grid = [];
+  for (let y=0;y<h;y++){
+    const row = [];
+    for (let x=0;x<w;x++){
+      const i = (y*w + x)*4;
+      const r = imageData.data[i], g = imageData.data[i+1], b = imageData.data[i+2];
+      // luminance
+      const lum = 0.299*r + 0.587*g + 0.114*b;
+      row.push(lum < thresh ? 1 : 0); // foreground = 1
+    }
+    grid.push(row);
+  }
+  // run marching squares
+  const paths = marchingSquares(grid);
+  lastPaths = paths;
+  // clear and draw paths as overlay
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img, 0,0,w,h);
+  ctx.strokeStyle = '#ff0000';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const p of paths){
+    if (p.length < 2) continue;
+    ctx.moveTo(p[0].x, p[0].y);
+    for (let i=1;i<p.length;i++){
+      ctx.lineTo(p[i].x, p[i].y);
+    }
+  }
+  ctx.stroke();
+}
+
+// Marching Squares implementation (returns array of paths, each path is array of {x,y} in pixel coords)
+function marchingSquares(grid){
+  const h = grid.length;
+  const w = (h>0?grid[0].length:0);
+  // each cell is between (x,y) and (x+1,y+1)
+  const segments = [];
+  // helper for midpoint on edges
+  function mix(a,b){
+    return {x:(a.x+b.x)/2, y:(a.y+b.y)/2};
+  }
+  for (let y=0;y<h-1;y++){
+    for (let x=0;x<w-1;x++){
+      const tl = grid[y][x];
+      const tr = grid[y][x+1];
+      const bl = grid[y+1][x];
+      const br = grid[y+1][x+1];
+      const idx = (tl<<3)|(tr<<2)|(br<<1)|(bl<<0); // 4-bit case
+      // positions (pixel coordinates)
+      const A = {x:x+0, y:y+0};
+      const B = {x:x+1, y:y+0};
+      const C = {x:x+1, y:y+1};
+      const D = {x:x+0, y:y+1};
+      const mAB = mix(A,B);
+      const mBC = mix(B,C);
+      const mCD = mix(C,D);
+      const mDA = mix(D,A);
+      // For each case, push segments (endpoints). Cases based on standard marching squares.
+      switch(idx){
+        case 0: break;
+        case 1: segments.push([mCD, mDA]); break;
+        case 2: segments.push([mBC, mCD]); break;
+        case 3: segments.push([mBC, mDA]); break;
+        case 4: segments.push([mAB, mBC]); break;
+        case 5: segments.push([mAB, mDA]); segments.push([mBC, mCD]); break;
+        case 6: segments.push([mAB, mCD]); break;
+        case 7: segments.push([mAB, mDA]); break;
+        case 8: segments.push([mAB, mDA]); break;
+        case 9: segments.push([mAB, mCD]); break;
+        case 10: segments.push([mAB, mBC]); segments.push([mCD, mDA]); break;
+        case 11: segments.push([mAB, mBC]); break;
+        case 12: segments.push([mBC, mDA]); break;
+        case 13: segments.push([mBC, mCD]); break;
+        case 14: segments.push([mCD, mDA]); break;
+        case 15: break;
+      }
+    }
+  }
+  // Join segments into continuous polylines
+  // Build map of endpoints (rounded) to segment indices
+  const key = (p)=>`${p.x.toFixed(4)},${p.y.toFixed(4)}`;
+  const endMap = new Map();
+  const used = new Array(segments.length).fill(false);
+  for (let i=0;i<segments.length;i++){
+    const s = segments[i];
+    const k1 = key(s[0]), k2 = key(s[1]);
+    if (!endMap.has(k1)) endMap.set(k1, []);
+    if (!endMap.has(k2)) endMap.set(k2, []);
+    endMap.get(k1).push({seg:i, end:0});
+    endMap.get(k2).push({seg:i, end:1});
+  }
+  const paths = [];
+  for (let i=0;i<segments.length;i++){
+    if (used[i]) continue;
+    used[i] = true;
+    let s = segments[i];
+    // start with s[0] -> s[1]
+    let path = [s[0], s[1]];
+    // extend forward from s[1]
+    let curEnd = s[1];
+    while(true){
+      const k = key(curEnd);
+      const neighbors = endMap.get(k) || [];
+      let found=false;
+      for (const n of neighbors){
+        if (used[n.seg]) continue;
+        used[n.seg]=true;
+        const seg = segments[n.seg];
+        // determine direction
+        let next;
+        if (Math.abs(seg[0].x - curEnd.x) < 1e-6 && Math.abs(seg[0].y - curEnd.y) < 1e-6){
+          next = seg[1];
+        } else {
+          next = seg[0];
+        }
+        path.push(next);
+        curEnd = next;
+        found=true;
+        break;
+      }
+      if (!found) break;
+    }
+    // try extending backwards from s[0]
+    curEnd = s[0];
+    while(true){
+      const k = key(curEnd);
+      const neighbors = endMap.get(k) || [];
+      let found=false;
+      for (const n of neighbors){
+        if (used[n.seg]) continue;
+        used[n.seg]=true;
+        const seg = segments[n.seg];
+        let next;
+        if (Math.abs(seg[0].x - curEnd.x) < 1e-6 && Math.abs(seg[0].y - curEnd.y) < 1e-6){
+          next = seg[1];
+        } else {
+          next = seg[0];
+        }
+        path.unshift(next);
+        curEnd = next;
+        found=true;
+        break;
+      }
+      if (!found) break;
+    }
+    // simplify short paths
+    if (path.length>1) paths.push(path.map(p=>({x:p.x, y:p.y})));
+  }
+  return paths;
+}
+
+// Generate G-Code from paths (pixel coords). Options: scale mm/px, feed, travel, useZ, zUp,zDown, laser
+function generateGCode(paths, opts){
+  // paths coordinates are in image pixels; we assume top-left origin. We'll map them to mm:
+  // X right positive, Y up positive -> we invert Y.
+  const lines = [];
+  lines.push('; Generated by Image→G-Code tool');
+  lines.push('G21 ; units = mm');
+  lines.push('G90 ; absolute coords');
+  lines.push('');
+  lines.push(`; scale: ${opts.scale} mm/px`);
+  let currentPenDown = false;
+  // start position at origin (0,0)
+  // Optionally add safety move
+  lines.push(`F${opts.travel}`);
+  for (const path of paths){
+    if (!path || path.length<1) continue;
+    // convert first point
+    const start = transformPoint(path[0], opts);
+    // rapid to start
+    if (opts.useZ && !opts.laser){
+      lines.push(`G0 Z${opts.zUp.toFixed(3)}`);
+    } else if (opts.laser){
+      // ensure laser off
+      lines.push('M5');
+    }
+    lines.push(`G0 X${start.x.toFixed(3)} Y${start.y.toFixed(3)}`);
+    // lower / turn on
+    if (opts.useZ && !opts.laser){
+      lines.push(`G0 Z${opts.zDown.toFixed(3)}`);
+    } else if (opts.laser){
+      lines.push('M3');
+    }
+    // draw feed
+    lines.push(`F${opts.feed}`);
+    for (let i=1;i<path.length;i++){
+      const p = transformPoint(path[i], opts);
+      lines.push(`G1 X${p.x.toFixed(3)} Y${p.y.toFixed(3)}`);
+    }
+    // lift/laser off
+    if (opts.useZ && !opts.laser){
+      lines.push(`G0 Z${opts.zUp.toFixed(3)}`);
+    } else if (opts.laser){
+      lines.push('M5');
+    }
+    lines.push('');
+  }
+  lines.push('; end');
+  return lines.join('\n');
+}
+
+function transformPoint(p, opts){
+  // map canvas pixel coords to mm, invert Y so origin is bottom-left
+  // We assume the image was drawn at top-left of canvas at size w x h. To preserve that we map Y to (imageHeight - y)
+  // We'll compute bounds from lastPaths to center if desired. For now map directly.
+  // Compute bounding box of all paths
+  const bbox = getPathsBBox(lastPaths);
+  const x_mm = (p.x - bbox.minX) * opts.scale + 0; // offset 0
+  const y_mm = ((bbox.maxY - p.y) ) * opts.scale + 0; // invert Y so bottom-left origin
+  return {x: x_mm, y: y_mm};
+}
+
+function getPathsBBox(paths){
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  for (const p of paths){
+    for (const pt of p){
+      if (pt.x < minX) minX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+  }
+  if (!isFinite(minX)){ minX=minY=maxX=maxY=0; }
+  return {minX,minY,maxX,maxY};
+}
+
+function getOptions(){
+  return {
+    scale: parseFloat(scaleInput.value) || 0.25,
+    feed: parseFloat(feedInput.value) || 1000,
+    travel: parseFloat(travelInput.value) || 3000,
+    useZ: useZInput.checked,
+    zUp: parseFloat(zUpInput.value) || 5,
+    zDown: parseFloat(zDownInput.value) || 0,
+    laser: laserInput.checked
+  };
+}
+
+function downloadText(text, filename){
+  const blob = new Blob([text], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
