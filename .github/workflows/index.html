@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Image → G-Code (Pen Plotter / Laser / CNC)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Image → G-Code</h1>
+    <p>Upload an image, preview traced paths, and download GRBL-compatible G-Code.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <label>Choose image:
+        <input id="file" type="file" accept="image/*" />
+      </label>
+
+      <label>Threshold: <input id="threshold" type="range" min="0" max="255" value="128" /></label>
+      <label>Scale (mm per px): <input id="scale" type="number" value="0.25" step="0.01" /></label>
+      <label>Draw Feed F (mm/min): <input id="feed" type="number" value="1000" /></label>
+      <label>Travel Feed F (mm/min): <input id="travel" type="number" value="3000" /></label>
+      <label>Use Z lift (pen): <input id="useZ" type="checkbox" checked /></label>
+      <label>Z up (mm): <input id="zUp" type="number" value="5" step="0.1" /></label>
+      <label>Z down (mm): <input id="zDown" type="number" value="0" step="0.1" /></label>
+      <label>Laser mode (use M3/M5 instead of Z): <input id="laser" type="checkbox" /></label>
+
+      <div class="buttons">
+        <button id="generate">Generate G-Code</button>
+        <button id="download" disabled>Download G-Code</button>
+      </div>
+    </section>
+
+    <section class="preview">
+      <canvas id="previewCanvas" width="800" height="600"></canvas>
+      <div class="gcode-output">
+        <h3>G-Code preview</h3>
+        <pre id="gcodeView" spellcheck="false"></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Designed for simple shapes and sketches. For complex images, increase resolution or pre-process externally.</small>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
